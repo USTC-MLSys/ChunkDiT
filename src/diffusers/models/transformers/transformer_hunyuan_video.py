@@ -27,6 +27,7 @@ from ..attention import AttentionMixin, FeedForward
 from ..attention_dispatch import dispatch_attention_fn
 from ..attention_processor import Attention
 from ..cache_utils import CacheMixin
+from ..chunk_dit_utils import ChunkDiTMixin, hunyuan_chunk_forward
 from ..embeddings import (
     CombinedTimestepTextProjEmbeddings,
     PixArtAlphaTextProjection,
@@ -549,6 +550,19 @@ class HunyuanVideoSingleTransformerBlock(nn.Module):
         *args,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        workspace = kwargs.pop("chunk_dit_workspace", None)
+        if workspace is not None:
+            return hunyuan_chunk_forward(
+                self,
+                hidden_states,
+                encoder_hidden_states,
+                temb,
+                attention_mask,
+                image_rotary_emb,
+                workspace,
+                single=True,
+            )
+
         text_seq_length = encoder_hidden_states.shape[1]
         hidden_states = torch.cat([hidden_states, encoder_hidden_states], dim=1)
 
@@ -629,6 +643,19 @@ class HunyuanVideoTransformerBlock(nn.Module):
         *args,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        workspace = kwargs.pop("chunk_dit_workspace", None)
+        if workspace is not None:
+            return hunyuan_chunk_forward(
+                self,
+                hidden_states,
+                encoder_hidden_states,
+                temb,
+                attention_mask,
+                freqs_cis,
+                workspace,
+                single=False,
+            )
+
         # 1. Input normalization
         norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
         norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(
@@ -839,7 +866,7 @@ class HunyuanVideoTokenReplaceTransformerBlock(nn.Module):
 
 
 class HunyuanVideoTransformer3DModel(
-    ModelMixin, AttentionMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin, CacheMixin
+    ModelMixin, AttentionMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin, CacheMixin, ChunkDiTMixin
 ):
     r"""
     A Transformer model for video-like data used in [HunyuanVideo](https://huggingface.co/tencent/HunyuanVideo).
@@ -1031,6 +1058,9 @@ class HunyuanVideoTransformer3DModel(
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
+        chunk_dit_workspace = self._chunk_dit_workspace()
+        if chunk_dit_workspace is not None and attention_kwargs:
+            raise ValueError("attention_kwargs are not supported with chunkDiT")
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
         p, p_t = self.config.patch_size, self.config.patch_size_t
         post_patch_num_frames = num_frames // p_t
@@ -1097,6 +1127,7 @@ class HunyuanVideoTransformer3DModel(
                     image_rotary_emb,
                     token_replace_emb,
                     first_frame_num_tokens,
+                    **({"chunk_dit_workspace": chunk_dit_workspace} if chunk_dit_workspace is not None else {}),
                 )
 
             for block in self.single_transformer_blocks:
@@ -1108,11 +1139,17 @@ class HunyuanVideoTransformer3DModel(
                     image_rotary_emb,
                     token_replace_emb,
                     first_frame_num_tokens,
+                    **({"chunk_dit_workspace": chunk_dit_workspace} if chunk_dit_workspace is not None else {}),
                 )
 
         # 5. Output projection
-        hidden_states = self.norm_out(hidden_states, temb)
-        hidden_states = self.proj_out(hidden_states)
+        if chunk_dit_workspace is None:
+            hidden_states = self.norm_out(hidden_states, temb)
+            hidden_states = self.proj_out(hidden_states)
+        else:
+            hidden_states = chunk_dit_workspace.project_output(
+                hidden_states, lambda states: self.norm_out(states, temb), self.proj_out
+            )
 
         hidden_states = hidden_states.reshape(
             batch_size, post_patch_num_frames, post_patch_height, post_patch_width, -1, p_t, p, p

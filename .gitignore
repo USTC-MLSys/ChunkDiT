@@ -186,3 +186,12 @@ wandb
 # AI agent generated symlinks
 /.agents/skills
 /.claude/skills
+
+# Local chunkDiT profiling data and environment snapshots
+/CHUNK_DIT.md
+/examples/chunk_dit/VALIDATION.md
+/examples/chunk_dit/validation/
+/examples/chunk_dit/results/
+/examples/chunk_dit/local-environment.txt
+/results/
+/outputs/

@@ -24,6 +24,7 @@ from ..activations import get_activation
 from ..attention_processor import Attention
 from ..modeling_outputs import AutoencoderKLOutput
 from ..modeling_utils import ModelMixin
+from .memory_efficient_decode import MemoryEfficientDecodeMixin, chunked_conv3d
 from .vae import AutoencoderMixin, DecoderOutput, DiagonalGaussianDistribution
 
 
@@ -73,6 +74,9 @@ class HunyuanVideoCausalConv3d(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = F.pad(hidden_states, self.time_causal_padding, mode=self.pad_mode)
+        chunk_size = getattr(self.conv, "_decode_conv_chunk_size", None)
+        if chunk_size is not None:
+            return chunked_conv3d(self.conv, hidden_states, chunk_size)
         return self.conv(hidden_states)
 
 
@@ -622,7 +626,7 @@ class HunyuanVideoDecoder3D(nn.Module):
         return hidden_states
 
 
-class AutoencoderKLHunyuanVideo(ModelMixin, AutoencoderMixin, ConfigMixin):
+class AutoencoderKLHunyuanVideo(ModelMixin, AutoencoderMixin, ConfigMixin, MemoryEfficientDecodeMixin):
     r"""
     A VAE model with KL loss for encoding videos into latents and decoding latent representations into videos.
     Introduced in [HunyuanVideo](https://huggingface.co/papers/2412.03603).

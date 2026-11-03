@@ -27,6 +27,7 @@ from ..downsampling import CogVideoXDownsample3D
 from ..modeling_outputs import AutoencoderKLOutput
 from ..modeling_utils import ModelMixin
 from ..upsampling import CogVideoXUpsample3D
+from .memory_efficient_decode import MemoryEfficientDecodeMixin, chunked_conv3d
 from .vae import AutoencoderMixin, DecoderOutput, DiagonalGaussianDistribution
 
 
@@ -39,6 +40,9 @@ class CogVideoXSafeConv3d(nn.Conv3d):
     """
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        chunk_size = getattr(self, "_decode_conv_chunk_size", None)
+        if chunk_size is not None:
+            return chunked_conv3d(self, input, chunk_size)
         memory_count = (
             (input.shape[0] * input.shape[1] * input.shape[2] * input.shape[3] * input.shape[4]) * 2 / 1024**3
         )
@@ -953,7 +957,9 @@ class CogVideoXDecoder3D(nn.Module):
         return hidden_states, new_conv_cache
 
 
-class AutoencoderKLCogVideoX(ModelMixin, AutoencoderMixin, ConfigMixin, FromOriginalModelMixin):
+class AutoencoderKLCogVideoX(
+    ModelMixin, AutoencoderMixin, ConfigMixin, FromOriginalModelMixin, MemoryEfficientDecodeMixin
+):
     r"""
     A VAE model with KL loss for encoding images into latents and decoding latent representations into images. Used in
     [CogVideoX](https://github.com/THUDM/CogVideo).

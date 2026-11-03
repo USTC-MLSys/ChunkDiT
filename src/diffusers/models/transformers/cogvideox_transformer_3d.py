@@ -25,6 +25,7 @@ from ...utils.torch_utils import maybe_allow_in_graph
 from ..attention import Attention, AttentionMixin, FeedForward
 from ..attention_processor import CogVideoXAttnProcessor2_0, FusedCogVideoXAttnProcessor2_0
 from ..cache_utils import CacheMixin
+from ..chunk_dit_utils import ChunkDiTMixin, cogvideox_chunk_forward
 from ..embeddings import CogVideoXPatchEmbed, TimestepEmbedding, Timesteps
 from ..modeling_outputs import Transformer2DModelOutput
 from ..modeling_utils import ModelMixin
@@ -122,7 +123,14 @@ class CogVideoXBlock(nn.Module):
         temb: torch.Tensor,
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
         attention_kwargs: dict[str, Any] | None = None,
+        chunk_dit_workspace=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if chunk_dit_workspace is not None:
+            if attention_kwargs:
+                raise ValueError("attention_kwargs are not supported with chunkDiT")
+            return cogvideox_chunk_forward(
+                self, hidden_states, encoder_hidden_states, temb, image_rotary_emb, chunk_dit_workspace
+            )
         text_seq_length = encoder_hidden_states.size(1)
         attention_kwargs = attention_kwargs or {}
 
@@ -157,7 +165,9 @@ class CogVideoXBlock(nn.Module):
         return hidden_states, encoder_hidden_states
 
 
-class CogVideoXTransformer3DModel(ModelMixin, AttentionMixin, ConfigMixin, PeftAdapterMixin, CacheMixin):
+class CogVideoXTransformer3DModel(
+    ModelMixin, AttentionMixin, ConfigMixin, PeftAdapterMixin, CacheMixin, ChunkDiTMixin
+):
     """
     A Transformer model for video-like data in [CogVideoX](https://github.com/THUDM/CogVideo).
 
@@ -404,6 +414,7 @@ class CogVideoXTransformer3DModel(ModelMixin, AttentionMixin, ConfigMixin, PeftA
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
+        chunk_dit_workspace = self._chunk_dit_workspace()
         batch_size, num_frames, channels, height, width = hidden_states.shape
 
         # 1. Time embedding
@@ -448,13 +459,18 @@ class CogVideoXTransformer3DModel(ModelMixin, AttentionMixin, ConfigMixin, PeftA
                     temb=emb,
                     image_rotary_emb=image_rotary_emb,
                     attention_kwargs=attention_kwargs,
+                    chunk_dit_workspace=chunk_dit_workspace,
                 )
 
-        hidden_states = self.norm_final(hidden_states)
-
         # 4. Final block
-        hidden_states = self.norm_out(hidden_states, temb=emb)
-        hidden_states = self.proj_out(hidden_states)
+        if chunk_dit_workspace is None:
+            hidden_states = self.norm_final(hidden_states)
+            hidden_states = self.norm_out(hidden_states, temb=emb)
+            hidden_states = self.proj_out(hidden_states)
+        else:
+            hidden_states = chunk_dit_workspace.project_output(
+                hidden_states, lambda states: self.norm_out(self.norm_final(states), temb=emb), self.proj_out
+            )
 
         # 5. Unpatchify
         p = self.config.patch_size
